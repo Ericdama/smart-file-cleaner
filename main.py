@@ -9,6 +9,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
+from rich.columns import Columns
+from rich.text import Text
+import pyfiglet
 
 app = typer.Typer(
     help="⚡ Smart CLI File Cleaner & Duplicate Finder",
@@ -21,6 +24,19 @@ HEAVY_FOLDERS = {
     "node_modules", "target", "dist", "build", ".next", 
     ".cache", "__pycache__", "venv", ".venv"
 }
+
+def render_banner():
+    """Renders an ASCII art header with styled panel borders."""
+    banner_text = pyfiglet.figlet_format("SmartCleaner", font="slant")
+    console.print(
+        Panel(
+            Text(banner_text, style="bold cyan"),
+            subtitle="[bold white]v1.0.0 | High-Performance Duplicate & Artifact Cleaner[/bold white]",
+            subtitle_align="right",
+            border_style="magenta",
+            expand=False
+        )
+    )
 
 def format_bytes(size: int) -> str:
     """Formats bytes into human-readable strings."""
@@ -40,6 +56,19 @@ def compute_stream_hash(file_path: Path, chunk_size: int = 65536) -> str:
         return hasher.hexdigest()
     except (PermissionError, OSError):
         return ""
+
+def get_file_type_badge(path: Path) -> str:
+    """Returns a color-coded extension badge for visual scanning."""
+    ext = path.suffix.lower()
+    if ext in [".exe", ".msi", ".zip", ".tar", ".gz"]:
+        return f"[bold red]{ext}[/bold red]"
+    elif ext in [".pptx", ".docx", ".pdf", ".xlsx"]:
+        return f"[bold blue]{ext}[/bold blue]"
+    elif ext in [".mp4", ".mkv", ".avi", ".mp3"]:
+        return f"[bold magenta]{ext}[/bold magenta]"
+    elif ext in [".py", ".js", ".java", ".cpp", ".html"]:
+        return f"[bold yellow]{ext}[/bold yellow]"
+    return f"[dim]{ext if ext else 'file'}[/dim]"
 
 @app.command()
 def scan(
@@ -63,11 +92,29 @@ def scan(
     """
     🔍 Scans a directory for duplicate files and heavy build artifacts.
     """
-    console.print(Panel.fit(
-        f"[bold cyan]Scanning Directory:[/bold cyan] [yellow]{target_path}[/yellow]\n"
-        f"[bold cyan]Min File Size:[/bold cyan] {min_size_mb} MB",
-        title="[bold green]Smart Cleaner[/bold green]"
-    ))
+    console.clear()
+    render_banner()
+
+    # --- Dashboard Cards ---
+    card_path = Panel(
+        f"[bold yellow]{target_path}[/bold yellow]", 
+        title="[bold cyan]Target Path[/bold cyan]", 
+        border_style="cyan"
+    )
+    card_size = Panel(
+        f"[bold green]≥ {min_size_mb} MB[/bold green]", 
+        title="[bold cyan]Min File Size[/bold cyan]", 
+        border_style="cyan"
+    )
+    status_color = "green" if check_builds else "red"
+    card_builds = Panel(
+        f"[{status_color}]{check_builds}[/{status_color}]", 
+        title="[bold cyan]Scan Build Artifacts[/bold cyan]", 
+        border_style="cyan"
+    )
+
+    console.print(Columns([card_path, card_size, card_builds]))
+    console.print()
 
     min_size_bytes = int(min_size_mb * 1024 * 1024)
     size_groups: Dict[int, List[Path]] = {}
@@ -75,26 +122,24 @@ def scan(
 
     # --- Step 1: Directory Walker ---
     with Progress(
-        SpinnerColumn(),
+        SpinnerColumn(spinner_name="dots"),
         TextColumn("[progress.description]{task.description}"),
-        transient=True
+        transient=True,
+        console=console
     ) as progress:
-        progress.add_task(description="Walking file tree...", total=None)
+        progress.add_task(description="[bold cyan]Scanning directory tree...", total=None)
 
         for root, dirs, files in os.walk(target_path):
             current_root = Path(root)
 
-            # Detect heavy build folders
             if check_builds:
                 for d in list(dirs):
                     if d in HEAVY_FOLDERS:
                         full_heavy_path = current_root / d
-                        # Calculate folder size
                         dir_size = sum(
                             f.stat().st_size for f in full_heavy_path.rglob('*') if f.is_file()
                         )
                         found_heavy_dirs.append((full_heavy_path, dir_size))
-                        # Don't recurse into this directory for duplicate scanning
                         dirs.remove(d)
 
             for file in files:
@@ -115,13 +160,13 @@ def scan(
     
     if total_files_to_hash > 0:
         with Progress(
-            SpinnerColumn(),
+            SpinnerColumn(spinner_name="bouncingBar"),
             TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
+            BarColumn(bar_width=40, style="black", complete_style="bold green"),
             TaskProgressColumn(),
             console=console
         ) as progress:
-            hash_task = progress.add_task("[cyan]Hashing size-matched candidates...", total=total_files_to_hash)
+            hash_task = progress.add_task("[bold cyan]Hashing size-matched candidates...", total=total_files_to_hash)
 
             for size, paths in candidate_size_groups.items():
                 for path in paths:
@@ -130,7 +175,6 @@ def scan(
                         duplicates.setdefault(file_hash, []).append(path)
                     progress.advance(hash_task)
 
-    # Filter hash maps to only keep true duplicates
     duplicate_sets = {h: paths for h, paths in duplicates.items() if len(paths) > 1}
 
     # --- Step 3: Render Results ---
@@ -138,24 +182,34 @@ def scan(
     
     # Render Heavy Directories Table
     if found_heavy_dirs:
-        table_heavy = Table(title="📦 Heavy Artifact Directories Found", header_style="bold magenta")
-        table_heavy.add_column("Path", style="dim")
-        table_heavy.add_column("Size", justify="right", style="bold red")
+        table_heavy = Table(
+            title="📦 Heavy Build Artifacts Detected",
+            header_style="bold magenta",
+            box=None,
+            show_lines=True
+        )
+        table_heavy.add_column("Artifact Directory Path", style="dim")
+        table_heavy.add_column("Disk Footprint", justify="right", style="bold red")
 
         total_heavy_space = 0
         for path, size in found_heavy_dirs:
             table_heavy.add_row(str(path), format_bytes(size))
             total_heavy_space += size
 
-        console.print(table_heavy)
-        console.print(f"[bold yellow]Total build artifact space:[/bold yellow] [bold red]{format_bytes(total_heavy_space)}[/bold red]\n")
+        console.print(Panel(table_heavy, border_style="magenta"))
+        console.print(f"[bold yellow]Total build artifact footprint:[/bold yellow] [bold red]{format_bytes(total_heavy_space)}[/bold red]\n")
 
     # Render Duplicates Table
     if duplicate_sets:
-        table_dups = Table(title="👥 Duplicate Files Found", header_style="bold cyan")
-        table_dups.add_column("Set", justify="center", style="bold green")
+        table_dups = Table(
+            title="👥 Duplicate Files Identified",
+            header_style="bold cyan",
+            show_lines=True
+        )
+        table_dups.add_column("Group", justify="center", style="bold green", width=10)
+        table_dups.add_column("Type", justify="center", width=8)
         table_dups.add_column("File Path")
-        table_dups.add_column("File Size", justify="right", style="bold yellow")
+        table_dups.add_column("Size", justify="right", style="bold yellow", width=12)
 
         wasted_space = 0
         set_idx = 1
@@ -164,21 +218,25 @@ def scan(
             wasted_space += fsize * (len(paths) - 1)
             
             for p in paths:
-                table_dups.add_row(f"Set #{set_idx}", str(p), format_bytes(fsize))
+                table_dups.add_row(
+                    f"Set #{set_idx}",
+                    get_file_type_badge(p),
+                    str(p),
+                    format_bytes(fsize)
+                )
             set_idx += 1
 
-        console.print(table_dups)
+        console.print(Panel(table_dups, border_style="cyan"))
         console.print(f"[bold yellow]Total reclaimable duplicate space:[/bold yellow] [bold red]{format_bytes(wasted_space)}[/bold red]\n")
     else:
-        console.print("[bold green]No duplicate files found above minimum size threshold![/bold green]\n")
+        console.print(Panel("[bold green]✓ No duplicate files detected above the size threshold.[/bold green]", border_style="green"))
 
-    # Exit if nothing to clean up
     if not duplicate_sets and not found_heavy_dirs:
         return
 
     # --- Step 4: Interactive Cleanup Prompt ---
     confirm_clean = inquirer.confirm(
-        message="Do you want to launch the interactive cleanup process?",
+        message="Launch interactive cleanup process?",
         default=False
     ).execute()
 
@@ -188,24 +246,24 @@ def scan(
 def clean_interactive(duplicate_sets: Dict[str, List[Path]], heavy_dirs: List[Tuple[Path, int]]):
     """Handles the interactive file and directory selection/deletion."""
     deleted_bytes = 0
+    deleted_files_count = 0
 
-    # 1. Heavy Folder Deletion
     if heavy_dirs:
         choices = [{"name": f"{p} ({format_bytes(s)})", "value": (p, s)} for p, s in heavy_dirs]
         selected_dirs = inquirer.checkbox(
-            message="Select heavy directories to REMOVE completely (Space to select, Enter to confirm):",
+            message="Select heavy directories to REMOVE (Space to toggle, Enter to confirm):",
             choices=choices
         ).execute()
 
         for path, size in selected_dirs:
             try:
                 shutil.rmtree(path)
-                console.print(f"[bold red]Deleted folder:[/bold red] {path}")
+                console.print(f"[bold red]✗ Deleted folder:[/bold red] {path}")
                 deleted_bytes += size
+                deleted_files_count += 1
             except Exception as e:
-                console.print(f"[bold yellow]Failed to delete {path}:[/bold yellow] {e}")
+                console.print(f"[bold yellow]⚠️ Failed to delete {path}:[/bold yellow] {e}")
 
-    # 2. Duplicate File Deletion
     if duplicate_sets:
         for file_hash, paths in duplicate_sets.items():
             console.print(f"\n[bold cyan]Duplicate Set (Size: {format_bytes(paths[0].stat().st_size)})[/bold cyan]")
@@ -214,7 +272,7 @@ def clean_interactive(duplicate_sets: Dict[str, List[Path]], heavy_dirs: List[Tu
             choices.append({"name": "SKIP THIS SET (Keep all)", "value": None})
 
             keep_path = inquirer.select(
-                message="Choose WHICH file to KEEP (the unselected ones will be deleted):",
+                message="Select file to KEEP (others will be permanently deleted):",
                 choices=choices
             ).execute()
 
@@ -224,16 +282,19 @@ def clean_interactive(duplicate_sets: Dict[str, List[Path]], heavy_dirs: List[Tu
                         try:
                             f_size = p.stat().st_size
                             p.unlink()
-                            console.print(f"[bold red]Deleted duplicate:[/bold red] {p}")
+                            console.print(f"[bold red]✗ Deleted duplicate:[/bold red] {p}")
                             deleted_bytes += f_size
+                            deleted_files_count += 1
                         except Exception as e:
-                            console.print(f"[bold yellow]Failed to delete {p}:[/bold yellow] {e}")
+                            console.print(f"[bold yellow]⚠️ Failed to delete {p}:[/bold yellow] {e}")
 
-    console.print(Panel.fit(
-        f"[bold green]Cleanup Complete![/bold green]\n"
-        f"Total Space Reclaimed: [bold red]{format_bytes(deleted_bytes)}[/bold red]",
-        title="[bold green]Success[/bold green]"
-    ))
+    # Final Execution Summary Card
+    summary_text = (
+        f"[bold white]Items Deleted:[/bold white] [bold yellow]{deleted_files_count}[/bold yellow]\n"
+        f"[bold white]Disk Space Reclaimed:[/bold white] [bold green]{format_bytes(deleted_bytes)}[/bold green]"
+    )
+    console.print("\n")
+    console.print(Panel(summary_text, title="[bold green]✓ Cleanup Complete[/bold green]", border_style="green", expand=False))
 
 if __name__ == "__main__":
     app()
